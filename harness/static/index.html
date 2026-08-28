@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Break Harness — Track 08</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Syne:wght@700;800&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0c0d10;
+      --panel: #14161c;
+      --ink: #e8e6df;
+      --muted: #8b8a84;
+      --line: #2a2d36;
+      --fail: #ff4d3a;
+      --pass: #3dd68c;
+      --crit: #ffb020;
+      --run: #c8ff4a;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: "IBM Plex Mono", ui-monospace, monospace; }
+    body { min-height: 100vh; }
+    header {
+      display: flex; align-items: flex-end; justify-content: space-between; gap: 16px;
+      padding: 28px 32px 18px; border-bottom: 1px solid var(--line);
+    }
+    h1 { font-family: Syne, sans-serif; font-weight: 800; font-size: 28px; letter-spacing: -0.04em; margin: 0; }
+    h1 span { color: var(--fail); }
+    .sub { color: var(--muted); font-size: 12px; margin-top: 6px; }
+    .actions { display: flex; gap: 10px; align-items: center; }
+    select, button {
+      font: inherit; background: var(--panel); color: var(--ink);
+      border: 1px solid var(--line); padding: 8px 12px; border-radius: 4px;
+    }
+    button.run {
+      background: var(--run); color: #111; border-color: var(--run); font-weight: 600; cursor: pointer;
+    }
+    button.run:disabled { opacity: 0.5; cursor: wait; }
+    main { display: grid; grid-template-columns: minmax(0, 1fr) 420px; min-height: calc(100vh - 110px); }
+    @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+    .table-wrap { padding: 12px 16px 32px; overflow: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; color: var(--muted); font-weight: 400; padding: 10px 8px; border-bottom: 1px solid var(--line); }
+    td { padding: 12px 8px; border-bottom: 1px solid var(--line); vertical-align: top; cursor: pointer; }
+    tr:hover td { background: #1a1d25; }
+    tr.selected td { background: #22262f; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 11px; letter-spacing: 0.04em; }
+    .fail { background: #3a1210; color: var(--fail); }
+    .pass { background: #0f2a1c; color: var(--pass); }
+    .crit { color: var(--crit); }
+    .empty { color: var(--muted); padding: 48px 8px; }
+    aside {
+      border-left: 1px solid var(--line); padding: 20px 22px; background: var(--panel); overflow: auto;
+    }
+    aside h2 { font-family: Syne, sans-serif; font-size: 18px; margin: 0 0 12px; }
+    .kv { margin: 0 0 10px; font-size: 12px; color: var(--muted); }
+    .kv b { color: var(--ink); font-weight: 600; }
+    pre {
+      white-space: pre-wrap; word-break: break-word; background: #0c0d10;
+      border: 1px solid var(--line); padding: 10px; font-size: 11px; line-height: 1.45;
+    }
+    .stats { color: var(--muted); font-size: 12px; padding: 8px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>AGENT <span>BREAK</span> HARNESS</h1>
+      <div class="sub">Open Agent Track 08 · reusable failure modes · not a chat demo</div>
+    </div>
+    <div class="actions">
+      <select id="target">
+        <option value="both">victim + hardened</option>
+        <option value="victim">victim only</option>
+        <option value="hardened">hardened only</option>
+      </select>
+      <button class="run" id="run" type="button">Run suite</button>
+    </div>
+  </header>
+  <main>
+    <section class="table-wrap">
+      <div class="stats" id="stats">Empty. Run the suite.</div>
+      <table>
+        <thead>
+          <tr>
+            <th>id</th><th>attack</th><th>target</th><th>verdict</th><th>severity</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div class="empty" id="empty">No reports yet. The Run button posts <code>/api/run-suite</code> and actually executes the five golden attacks against the in-repo toy agent.</div>
+    </section>
+    <aside id="detail">
+      <h2>detail</h2>
+      <p class="kv">Click a row. Fails are the product.</p>
+    </aside>
+  </main>
+  <script>
+    const rowsEl = document.getElementById("rows");
+    const emptyEl = document.getElementById("empty");
+    const statsEl = document.getElementById("stats");
+    const detailEl = document.getElementById("detail");
+    const runBtn = document.getElementById("run");
+    let selected = null;
+
+    function esc(s) {
+      return String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c]));
+    }
+
+    async function loadList() {
+      const res = await fetch("/api/reports");
+      const data = await res.json();
+      renderList(data.reports || []);
+    }
+
+    function renderList(reports) {
+      rowsEl.innerHTML = "";
+      emptyEl.style.display = reports.length ? "none" : "block";
+      const fails = reports.filter(r => r.verdict === "fail").length;
+      statsEl.textContent = reports.length
+        ? `${fails} fail / ${reports.length - fails} pass · click a fail for payload, tool_calls, repro`
+        : "Empty. Run the suite.";
+      for (const r of reports) {
+        const tr = document.createElement("tr");
+        tr.dataset.id = r.id;
+        if (r.id === selected) tr.classList.add("selected");
+        tr.innerHTML = `
+          <td>${esc(r.id)}</td>
+          <td>${esc(r.type)}</td>
+          <td>${esc(r.target)}</td>
+          <td><span class="pill ${r.verdict}">${esc(r.verdict)}</span></td>
+          <td class="${r.severity === "crit" ? "crit" : ""}">${esc(r.severity || "—")}</td>`;
+        tr.addEventListener("click", () => showDetail(r.id));
+        rowsEl.appendChild(tr);
+      }
+    }
+
+    async function showDetail(id) {
+      selected = id;
+      for (const tr of rowsEl.querySelectorAll("tr")) tr.classList.toggle("selected", tr.dataset.id === id);
+      const res = await fetch("/api/reports/" + encodeURIComponent(id));
+      if (!res.ok) { detailEl.innerHTML = "<h2>missing</h2>"; return; }
+      const r = await res.json();
+      const payload = JSON.stringify(r.attack && r.attack.payload, null, 2);
+      const calls = JSON.stringify(r.observed && r.observed.tool_calls, null, 2);
+      detailEl.innerHTML = `
+        <h2>${esc(r.id)}</h2>
+        <p class="kv"><b>verdict</b> ${esc(r.verdict)} · <b>severity</b> ${esc(r.severity || "—")} · <b>target</b> ${esc(r.target)}</p>
+        <p class="kv"><b>type</b> ${esc(r.attack.type)}</p>
+        <p class="kv"><b>repro</b> ${esc(r.repro && r.repro.command)}</p>
+        <p class="kv"><b>fix_hint</b> ${esc(r.fix_hint)}</p>
+        <p class="kv"><b>final</b></p>
+        <pre>${esc(r.observed && r.observed.final)}</pre>
+        <p class="kv"><b>observed.tool_calls</b></p>
+        <pre>${esc(calls)}</pre>
+        <p class="kv"><b>payload</b></p>
+        <pre>${esc(payload)}</pre>
+        <p class="kv"><b>expect</b></p>
+        <pre>${esc(JSON.stringify(r.expect, null, 2))}</pre>`;
+    }
+
+    runBtn.addEventListener("click", async () => {
+      runBtn.disabled = true;
+      runBtn.textContent = "Running…";
+      try {
+        const target = document.getElementById("target").value;
+        const res = await fetch("/api/run-suite", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ target }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        renderList((data.reports || []).map(r => ({
+          id: r.id, target: r.target, type: r.attack.type, title: r.attack.title,
+          verdict: r.verdict, severity: r.severity,
+        })));
+        const firstFail = (data.reports || []).find(r => r.verdict === "fail");
+        if (firstFail) showDetail(firstFail.id);
+      } catch (err) {
+        statsEl.textContent = "Suite error: " + err.message;
+      } finally {
+        runBtn.disabled = false;
+        runBtn.textContent = "Run suite";
+      }
+    });
+
+    loadList();
+  </script>
+</body>
+</html>
